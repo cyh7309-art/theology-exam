@@ -498,7 +498,7 @@
   var CONFIG = {
     // 결과를 받을 Google Apps Script 웹앱 URL.
     // 비워 두면 결과를 전송하지 않고 '요약 복사' 방식으로 동작합니다.
-    ENDPOINT: "https://script.google.com/macros/s/AKfycbw3TrDijtuoMjcHivcZRWmD7bi-PsQOAUDlvCxW4CGXjVEwQxwooZfYMszsi-rO5ICuKQ/exec",
+    ENDPOINT: "",
 
     // 시험 모드 제한시간(분). 0으로 두면 시간 제한 없음.
     MINUTES: 40,
@@ -509,7 +509,7 @@
     CLOSE_AT: "",
 
     // 시험 모드를 한 브라우저에서 1회만 응시하도록 제한 (연습 모드는 항상 무제한)
-    ONE_ATTEMPT: false,
+    ONE_ATTEMPT: true,
 
     // 시험 제출 후 정답·해설 열람 허용
     ALLOW_REVIEW: true,
@@ -1100,6 +1100,55 @@
           })
         };
       }
+      /* 결과 전송
+         1순위 : JSONP(GET) — 브라우저 보안 정책과 무관하게 서버 응답을 실제로 확인할 수 있음
+         2순위 : fetch(POST) — 1순위가 막힌 환경 대비
+         두 방법 모두 서버가 ok를 돌려줄 때만 '전송 완료'로 표시합니다. */
+      function compactOf(t){
+        var full=payloadOf(t);
+        var c={};
+        for(var k in full) if(k!=="answers") c[k]=full[k];
+        c.ans=full.answers.map(function(a){
+          return a.n+":"+(a.given===null?"":String(a.given))+":"+(a.correct?1:0);
+        }).join("|");
+        return c;
+      }
+      function sendJsonp(t, done){
+        var name="__examcb"+Date.now()+Math.floor(Math.random()*1000);
+        var s=document.createElement("script"), finished=false, tm;
+        function cleanup(){
+          clearTimeout(tm);
+          try{ delete window[name]; }catch(e){ window[name]=undefined; }
+          if(s.parentNode) s.parentNode.removeChild(s);
+        }
+        window[name]=function(r){ if(finished) return; finished=true; cleanup(); done(!!(r&&r.ok), r); };
+        s.onerror=function(){ if(finished) return; finished=true; cleanup(); done(false,null); };
+        tm=setTimeout(function(){ if(finished) return; finished=true; cleanup(); done(false,null); }, 20000);
+        var sep=CONFIG.ENDPOINT.indexOf("?")>=0 ? "&" : "?";
+        s.src=CONFIG.ENDPOINT+sep+"callback="+name+"&payload="+encodeURIComponent(JSON.stringify(compactOf(t)));
+        document.body.appendChild(s);
+      }
+      function sendPost(t, done){
+        var body=JSON.stringify(payloadOf(t));
+        var ok=false;
+        fetch(CONFIG.ENDPOINT,{method:"POST",body:body})
+          .then(function(r){ return r.json(); })
+          .then(function(j){ ok=!!(j&&j.ok); })
+          .catch(function(){ ok=false; })
+          .then(function(){ done(ok); });
+      }
+      function sendOk(){
+        A.sent=true; save(A);
+        sendbox.className="sendbox ok";
+        sendbox.innerHTML="✓ 결과가 <b>신학부 서무</b>에게 전송되었습니다.";
+        retrySend.hidden=true;
+      }
+      function sendFail(){
+        sendbox.className="sendbox err";
+        sendbox.innerHTML="결과 전송에 실패했습니다. 아래 <b>결과 요약 복사</b>를 눌러 담당 서무에게 직접 보내 주십시오.";
+        retrySend.hidden=false;
+        document.getElementById("summary").hidden=false;
+      }
       function send(t){
         if(!CONFIG.ENDPOINT){
           sendbox.hidden=false; sendbox.className="sendbox";
@@ -1110,30 +1159,10 @@
         sendbox.hidden=false; sendbox.className="sendbox";
         sendbox.innerHTML="결과를 전송하고 있습니다…";
         retrySend.hidden=true;
-        var body=JSON.stringify(payloadOf(t));
-        fetch(CONFIG.ENDPOINT,{method:"POST",body:body})
-          .then(function(r){ return r.json(); })
-          .then(function(j){ if(j&&j.ok) throw {done:true}; throw new Error("rejected"); })
-          .catch(function(err){
-            if(err&&err.done){
-              A.sent=true; save(A);
-              sendbox.className="sendbox ok";
-              sendbox.innerHTML="✓ 결과가 <b>신학부 서무</b>에게 전송되었습니다.";
-              return;
-            }
-            return fetch(CONFIG.ENDPOINT,{method:"POST",mode:"no-cors",body:body})
-              .then(function(){
-                A.sent=true; save(A);
-                sendbox.className="sendbox ok";
-                sendbox.innerHTML="✓ 결과를 전송했습니다. 담당 서무의 시트에서 확인됩니다.";
-              })
-              .catch(function(){
-                sendbox.className="sendbox err";
-                sendbox.innerHTML="전송에 실패했습니다. <b>결과 요약 복사</b>를 눌러 담당 서무에게 직접 보내 주십시오.";
-                retrySend.hidden=false;
-                document.getElementById("summary").hidden=false;
-              });
-          });
+        sendJsonp(t, function(ok){
+          if(ok){ sendOk(); return; }
+          sendPost(t, function(ok2){ if(ok2) sendOk(); else sendFail(); });
+        });
       }
 
       function showResult(t){
